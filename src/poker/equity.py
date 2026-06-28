@@ -1,9 +1,11 @@
 """Monte Carlo (and exact) equity estimation for Texas Hold'em.
 
-Equity is the share of the pot a hand wins on average at showdown, counting
-split pots fractionally. :func:`equity` estimates it by simulating random
-runouts and opponent holdings; it reports the estimate together with a standard
-error and a 95% confidence interval, the quantities that make the Monte Carlo
+Equity is the share of the pot a hand wins on average at showdown, counting a
+split pot as half. This module estimates hero's equity against a single
+opponent -- a fixed hand or a range -- on any board.
+
+:func:`equity` runs a Monte Carlo simulation and reports the estimate together
+with a standard error and a 95% confidence interval, making the sampling
 uncertainty explicit. :func:`equity_exact` enumerates the remaining cards for
 small spaces and is used to cross-check the estimator.
 """
@@ -13,7 +15,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from itertools import combinations, product
+from itertools import combinations
 
 import numpy as np
 
@@ -22,9 +24,6 @@ from .evaluator import evaluate7
 from .ranges import Combo, parse_range
 
 Z_95 = 1.959963984540054  # standard normal quantile for a 95% two-sided interval
-
-# An opponent is specified as a fixed hand ("AhKh") or a range ("QQ+, AKs"),
-# either as a string or already-parsed cards/combos.
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,24 +54,26 @@ class EquityResult:
 
 
 def _as_cards(value: str | Sequence[Card]) -> list[Card]:
-    if isinstance(value, str):
-        return parse_cards(value)
-    return list(value)
+    return parse_cards(value) if isinstance(value, str) else list(value)
 
 
-def _opponent_combos(spec, dead: set[Card]) -> list[Combo]:
-    """Resolve an opponent spec to the list of legal combos given dead cards."""
-    if isinstance(spec, str):
+def _ordered(a: Card, b: Card) -> Combo:
+    return (a, b) if a.code > b.code else (b, a)
+
+
+def _opponent_combos(opponent, dead: set[Card]) -> list[Combo]:
+    """Resolve an opponent (fixed hand or range) to its legal combos."""
+    if isinstance(opponent, str):
         try:
-            cards = parse_cards(spec)
+            cards = parse_cards(opponent)
         except ValueError:
             cards = None
         if cards is not None and len(cards) == 2:
             combos = [_ordered(cards[0], cards[1])]
         else:
-            combos = parse_range(spec, exclude=dead)
+            combos = parse_range(opponent, exclude=dead)
     else:
-        items = list(spec)
+        items = list(opponent)
         if items and isinstance(items[0], Card):  # a fixed two-card hand
             if len(items) != 2:
                 raise ValueError("a fixed opponent hand must have exactly 2 cards")
@@ -85,132 +86,105 @@ def _opponent_combos(spec, dead: set[Card]) -> list[Combo]:
     return legal
 
 
-def _ordered(a: Card, b: Card) -> Combo:
-    return (a, b) if a.code > b.code else (b, a)
-
-
-def _normalize_opponents(opponents) -> list:
-    # A bare string, or a single fixed hand given as a list of Cards, is one opponent.
-    if isinstance(opponents, str):
-        return [opponents]
-    items = list(opponents)
-    if items and isinstance(items[0], Card):
-        return [items]
-    return list(items)
-
-
-def _hero_share(hero_score: int, opp_scores: list[int]) -> float:
-    """Hero's pot share for one showdown (1 sole win, 1/k for a k-way tie, 0 loss)."""
-    best = hero_score
-    for s in opp_scores:
-        if s > best:
-            return 0.0
-    winners = 1 + sum(1 for s in opp_scores if s == hero_score)
-    return 1.0 / winners
-
-
-def _summarize(shares: np.ndarray, exact: bool) -> EquityResult:
-    n = int(shares.size)
-    equity = float(shares.mean())
-    win = float(np.mean(shares == 1.0))
-    loss = float(np.mean(shares == 0.0))
-    tie = float(1.0 - win - loss)
-    if exact:
-        return EquityResult(equity, win, tie, loss, n, 0.0, equity, equity, True)
-    std_error = float(shares.std(ddof=1) / math.sqrt(n)) if n > 1 else float("inf")
-    half = Z_95 * std_error
-    return EquityResult(
-        equity, win, tie, loss, n, std_error,
-        max(0.0, equity - half), min(1.0, equity + half), False,
-    )
-
-
-def equity(
-    hero: str | Sequence[Card],
-    opponents,
-    board: str | Sequence[Card] = (),
-    n: int = 100_000,
-    seed: int | np.random.Generator | None = None,
-) -> EquityResult:
-    """Estimate hero's equity by Monte Carlo simulation.
-
-    ``opponents`` is a single spec (fixed hand or range) or a list of specs for
-    multiway pots. ``board`` holds 0, 3, 4 or 5 known community cards.
-    """
-    rng = seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed)
-    hero_cards = _as_cards(hero)
-    board_cards = _as_cards(board)
+def _validate(hero_cards: list[Card], board_cards: list[Card]) -> set[Card]:
     if len(hero_cards) != 2:
         raise ValueError("hero must have exactly 2 cards")
     if len(board_cards) not in (0, 3, 4, 5):
         raise ValueError("board must have 0, 3, 4 or 5 cards")
-
     dead = set(hero_cards) | set(board_cards)
     if len(dead) != len(hero_cards) + len(board_cards):
         raise ValueError("duplicate cards among hero and board")
+    return dead
 
-    opp_specs = _normalize_opponents(opponents)
-    opp_combo_lists = [_opponent_combos(spec, dead) for spec in opp_specs]
 
+def _summarize(shares: np.ndarray, exact: bool) -> EquityResult:
+    n = int(shares.size)
+    eq = float(shares.mean())
+    win = float(np.mean(shares == 1.0))
+    loss = float(np.mean(shares == 0.0))
+    tie = float(1.0 - win - loss)
+    if exact:
+        return EquityResult(eq, win, tie, loss, n, 0.0, eq, eq, True)
+    std_error = float(shares.std(ddof=1) / math.sqrt(n)) if n > 1 else float("inf")
+    half = Z_95 * std_error
+    return EquityResult(
+        eq, win, tie, loss, n, std_error,
+        max(0.0, eq - half), min(1.0, eq + half), False,
+    )
+
+
+def _simulate(hero, opponent, board, n, seed) -> np.ndarray:
+    """Run ``n`` showdowns and return hero's pot share for each."""
+    rng = seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed)
+    hero_cards = _as_cards(hero)
+    board_cards = _as_cards(board)
+    dead = _validate(hero_cards, board_cards)
+    opp_combos = _opponent_combos(opponent, dead)
     need = 5 - len(board_cards)
+
     shares = np.empty(n, dtype=np.float64)
-
     for i in range(n):
-        used = set(dead)
-        opp_hands = []
-        for combos in opp_combo_lists:
-            combo = combos[rng.integers(len(combos))]
-            while combo[0] in used or combo[1] in used:
-                combo = combos[rng.integers(len(combos))]
-            opp_hands.append(combo)
-            used.add(combo[0])
-            used.add(combo[1])
-
+        villain = opp_combos[rng.integers(len(opp_combos))]
+        while villain[0] in dead or villain[1] in dead:
+            villain = opp_combos[rng.integers(len(opp_combos))]
+        used = (*dead, villain[0], villain[1])
         available = [c for c in FULL_DECK if c not in used]
         drawn = rng.choice(len(available), size=need, replace=False) if need else ()
         runout = board_cards + [available[j] for j in drawn]
-
         hero_score = evaluate7(hero_cards + runout)
-        opp_scores = [evaluate7([oh[0], oh[1], *runout]) for oh in opp_hands]
-        shares[i] = _hero_share(hero_score, opp_scores)
+        villain_score = evaluate7([villain[0], villain[1], *runout])
+        shares[i] = _share(hero_score, villain_score)
+    return shares
 
-    return _summarize(shares, exact=False)
+
+def _share(hero_score: int, villain_score: int) -> float:
+    if hero_score > villain_score:
+        return 1.0
+    if hero_score < villain_score:
+        return 0.0
+    return 0.5
+
+
+def equity(
+    hero: str | Sequence[Card],
+    opponent,
+    board: str | Sequence[Card] = (),
+    n: int = 100_000,
+    seed: int | np.random.Generator | None = None,
+) -> EquityResult:
+    """Estimate hero's equity against one opponent by Monte Carlo simulation.
+
+    ``opponent`` is a fixed hand (``"QsQc"``) or a range (``"QQ+, AKs"``).
+    ``board`` holds 0, 3, 4 or 5 known community cards.
+    """
+    return _summarize(_simulate(hero, opponent, board, n, seed), exact=False)
 
 
 def equity_exact(
     hero: str | Sequence[Card],
-    opponents,
+    opponent,
     board: str | Sequence[Card] = (),
 ) -> EquityResult:
-    """Exact equity by full enumeration. Only practical for small remaining spaces.
+    """Exact equity by enumerating every opponent hand and board completion.
 
-    Enumerates every legal assignment of opponent holdings and every board
-    completion with uniform weight. Intended for turn/river spots (and as a
-    cross-check for :func:`equity`), not preflop multiway.
+    Only practical for small remaining spaces (turn/river, or two fixed hands on
+    an early board). Used as a cross-check for :func:`equity`.
     """
     hero_cards = _as_cards(hero)
     board_cards = _as_cards(board)
-    if len(hero_cards) != 2:
-        raise ValueError("hero must have exactly 2 cards")
-
-    dead = set(hero_cards) | set(board_cards)
-    opp_specs = _normalize_opponents(opponents)
-    opp_combo_lists = [_opponent_combos(spec, dead) for spec in opp_specs]
+    dead = _validate(hero_cards, board_cards)
+    opp_combos = _opponent_combos(opponent, dead)
     need = 5 - len(board_cards)
 
     shares: list[float] = []
-    for assignment in product(*opp_combo_lists):
-        used = set(dead)
-        cards = [c for combo in assignment for c in combo]
-        if len(set(cards)) != len(cards) or any(c in used for c in cards):
-            continue  # overlapping opponent holdings
-        used.update(cards)
+    for villain in opp_combos:
+        used = {*dead, villain[0], villain[1]}
         pool = [c for c in FULL_DECK if c not in used]
         for extra in combinations(pool, need):
             runout = board_cards + list(extra)
             hero_score = evaluate7(hero_cards + runout)
-            opp_scores = [evaluate7([oh[0], oh[1], *runout]) for oh in assignment]
-            shares.append(_hero_share(hero_score, opp_scores))
+            villain_score = evaluate7([villain[0], villain[1], *runout])
+            shares.append(_share(hero_score, villain_score))
 
     if not shares:
         raise ValueError("no legal outcomes to enumerate")
@@ -219,43 +193,17 @@ def equity_exact(
 
 def equity_curve(
     hero: str | Sequence[Card],
-    opponents,
+    opponent,
     board: str | Sequence[Card] = (),
     n: int = 100_000,
     seed: int | np.random.Generator | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return running equity estimate and +/-1.96 SE band vs sample size.
+    """Running equity estimate and +/-1.96 SE band after each sample.
 
-    Reuses the same simulation as :func:`equity` but exposes the cumulative
-    estimate after each sample, for convergence plots. Returns
-    ``(n_values, estimate, half_width)`` arrays of length ``n``.
+    Returns ``(n_values, estimate, half_width)`` arrays of length ``n`` for
+    convergence plots.
     """
-    rng = seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed)
-    hero_cards = _as_cards(hero)
-    board_cards = _as_cards(board)
-    dead = set(hero_cards) | set(board_cards)
-    opp_specs = _normalize_opponents(opponents)
-    opp_combo_lists = [_opponent_combos(spec, dead) for spec in opp_specs]
-    need = 5 - len(board_cards)
-
-    shares = np.empty(n, dtype=np.float64)
-    for i in range(n):
-        used = set(dead)
-        opp_hands = []
-        for combos in opp_combo_lists:
-            combo = combos[rng.integers(len(combos))]
-            while combo[0] in used or combo[1] in used:
-                combo = combos[rng.integers(len(combos))]
-            opp_hands.append(combo)
-            used.add(combo[0])
-            used.add(combo[1])
-        available = [c for c in FULL_DECK if c not in used]
-        drawn = rng.choice(len(available), size=need, replace=False) if need else ()
-        runout = board_cards + [available[j] for j in drawn]
-        hero_score = evaluate7(hero_cards + runout)
-        opp_scores = [evaluate7([oh[0], oh[1], *runout]) for oh in opp_hands]
-        shares[i] = _hero_share(hero_score, opp_scores)
-
+    shares = _simulate(hero, opponent, board, n, seed)
     counts = np.arange(1, n + 1)
     cum_mean = np.cumsum(shares) / counts
     cum_sq = np.cumsum(shares**2) / counts
@@ -265,9 +213,4 @@ def equity_curve(
     return counts, cum_mean, half
 
 
-__all__ = [
-    "EquityResult",
-    "equity",
-    "equity_exact",
-    "equity_curve",
-]
+__all__ = ["EquityResult", "equity", "equity_exact", "equity_curve"]
