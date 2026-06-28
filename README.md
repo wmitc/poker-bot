@@ -5,42 +5,97 @@ A Texas Hold'em **equity calculator** (hand vs. hand or hand vs. range via Monte
 demonstrate **Monte Carlo estimation** (with convergence and standard-error analysis) and
 **expected-value (EV) reasoning**.
 
-> Status: under active development. See [the roadmap](#roadmap) below.
-
 ## Why this project
 
 Two ideas that come up constantly in quant interviews show up here in a concrete, testable form:
 
 - **Monte Carlo methods** — estimate the probability of winning a hand by simulating thousands of
   random runouts, and quantify the estimate's uncertainty with a standard error / confidence
-  interval. The accompanying notebook shows the estimate converging as `O(1/sqrt(N))`.
+  interval. The [convergence notebook](notebooks/convergence.ipynb) shows the estimate converging
+  and the standard error falling like `1/sqrt(N)` (fitted log-log slope ≈ −0.50).
 - **EV reasoning** — turn an equity number into a decision. The bot compares equity to pot odds
   (call iff `equity > to_call / (pot + to_call)`) and evaluates the chip-EV of an all-in shove.
 
-## Features (planned)
+## Features
 
-- From-scratch 7-card hand evaluator (validated against an exhaustive brute-force oracle).
-- Monte Carlo equity: hand vs. hand, hand vs. range, with partial boards (flop/turn).
+- From-scratch 7-card hand evaluator, validated against an exhaustive brute-force oracle.
+- Monte Carlo equity: hand vs. hand or hand vs. range, on any board, with a 95% confidence
+  interval.
 - Exact enumeration for small remaining spaces, used to cross-check the Monte Carlo estimates.
-- Hand-range notation parser (`QQ+`, `AKs`, `ATo+`, `22-99`, ...).
-- A push/fold + pot-odds bot.
-- A convergence notebook visualising estimate vs. sample size and standard-error scaling.
+- Hand-range notation parser (`QQ+`, `AKs`, `ATo+`, `22-99`, `T9s-65s`, ...).
+- A push/fold + pot-odds bot, plus a 13×13 push/fold chart.
 
 ## Install
 
 ```bash
 git clone https://github.com/wmitc/poker-bot
 cd poker-bot
-pip install -e ".[dev]"
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev,notebook]"
 ```
 
 ## Usage
 
-CLI and library usage are documented here as the features land. Example (planned):
+### Command line
 
 ```bash
-poker equity --hero AhKh --villain QsQc --sims 100000 --seed 1
+# Equity of a hand vs a hand
+poker equity --hero AhKh --vs QsQc --sims 100000 --seed 1
+#   AhKh vs QsQc
+#     equity 0.4637 +/- 0.0035 (95% CI [0.4568, 0.4706], n=100000)
+#     win 0.462  tie 0.004  loss 0.534
+
+# Equity of a hand vs a range, on a flop
+poker equity --hero AsKs --vs "QQ+, AKo" --board Ah7d2c --sims 100000
+
+# Heads-up push/fold decision
+poker pushfold --hero AsKs --stack 12
+#   AsKs at 12.0bb vs calling range [...]
+#     decision: PUSH
+#     EV(push) +1.41bb   EV(fold) -0.50bb
 ```
+
+### Library
+
+```python
+from poker.equity import equity, equity_exact
+from poker.bot import pot_odds_decision, pushfold_ev
+
+equity("AsAh", "KsKh", n=100_000, seed=1)        # AA vs KK ≈ 0.82
+equity("AsKs", "QQ+, AKo", board="Ah7d2c")        # vs a range, on a flop
+equity_exact("AsAh", "KsKh", board="2c7d9hQs")    # exact (river enumeration)
+
+pot_odds_decision(equity_value=0.40, to_call=10, pot=20)   # call/fold from pot odds
+pushfold_ev("AsKs", "22+, A2s+, KTo+", stack_bb=12)        # shove/fold EV
+```
+
+## Results
+
+The [convergence notebook](notebooks/convergence.ipynb) estimates the classic **AA vs KK** cooler
+(true equity ≈ `0.8217` for the aces) and tracks the running Monte Carlo estimate. The estimate
+settles onto the true value and its 95% confidence band tightens as the sample size grows:
+
+![Monte Carlo estimate converging to the true equity](docs/images/convergence.png)
+
+Plotting the standard error against the number of simulations on log-log axes gives a straight
+line — a fitted slope of **−0.50**, exactly the `1/sqrt(N)` scaling of Monte Carlo error:
+
+![Standard error scaling like 1/sqrt(N)](docs/images/standard-error.png)
+
+## How it works
+
+- **Hand evaluator** (`poker.evaluator`) maps any 5–7 card hand to a single integer so hands
+  compare with `>`. A direct 7-card evaluator is the Monte Carlo hot path; an independent
+  brute-force evaluator serves as a test oracle.
+- **Equity** (`poker.equity`) deals random runouts (and random opponent holdings from a range),
+  scores the showdown, and averages hero's pot share. It reports the standard error and a 95%
+  confidence interval; `equity_exact` enumerates outcomes when few cards remain.
+- **Bot** (`poker.bot`) turns equity into decisions: pot-odds calls and the chip-EV of an open
+  shove, `EV_push = (1 − f)·bb + f·(2e − 1)·stack`, where `f` is villain's call frequency and `e`
+  hero's equity when called.
+
+A note on performance: the evaluator is pure Python for clarity, which is the Monte Carlo
+bottleneck (~30 µs per simulated showdown) — comfortably fast enough for `1e4`–`1e6` simulations.
 
 ## Development
 
@@ -48,20 +103,6 @@ poker equity --hero AhKh --villain QsQc --sims 100000 --seed 1
 ruff check .
 pytest
 ```
-
-A note on performance: the hand evaluator is pure Python for clarity, which is the Monte Carlo
-bottleneck. It is comfortably fast enough for `1e4`–`1e6` simulations.
-
-## Roadmap
-
-1. Project scaffold
-2. Cards & deck
-3. Hand evaluator
-4. Range parser
-5. Monte Carlo equity
-6. Push/fold + pot-odds bot
-7. CLI
-8. Convergence notebook
 
 ## License
 
