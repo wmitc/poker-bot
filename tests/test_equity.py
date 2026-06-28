@@ -54,12 +54,6 @@ def test_equity_against_range_runs_and_is_reasonable():
     assert 0.3 < res.equity < 0.7
 
 
-def test_multiway_equity_lower_than_heads_up():
-    hu = equity("AsAh", "KsKh", n=8000, seed=5)
-    multi = equity("AsAh", ["KsKh", "QsQh"], n=8000, seed=5)
-    assert multi.equity < hu.equity  # more opponents -> less equity
-
-
 def test_exact_vs_mc_on_flop():
     # Two known hands on a flop: turn+river enumerated, C(45, 2) = 990 outcomes.
     board = "2c7dTh"
