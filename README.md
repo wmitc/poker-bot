@@ -69,6 +69,19 @@ pot_odds_decision(equity_value=0.40, to_call=10, pot=20)   # call/fold from pot 
 pushfold_ev("AsKs", "22+, A2s+, KTo+", stack_bb=12)        # shove/fold EV
 ```
 
+## Results
+
+The [convergence notebook](notebooks/convergence.ipynb) estimates the classic **AA vs KK** cooler
+(true equity ≈ `0.8217` for the aces) and tracks the running Monte Carlo estimate. The estimate
+settles onto the true value and its 95% confidence band tightens as the sample size grows:
+
+![Monte Carlo estimate converging to the true equity](docs/images/convergence.png)
+
+Plotting the standard error against the number of simulations on log-log axes gives a straight
+line — a fitted slope of **−0.50**, exactly the `1/sqrt(N)` scaling of Monte Carlo error:
+
+![Standard error scaling like 1/sqrt(N)](docs/images/standard-error.png)
+
 ## How it works
 
 - **Hand evaluator** (`poker.evaluator`) maps any 5–7 card hand to a single integer so hands
